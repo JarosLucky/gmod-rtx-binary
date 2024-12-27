@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    - name: Install dependencies
+      run: sudo apt-get install gcc-multilib g++-multilib gcc-multilib g++-multilib 
     - uses: actions/checkout@v4
       with: 
         path: 'build'
@@ -21,7 +23,7 @@ jobs:
     - name: Setup premake
       working-directory: ./build
       # Run premake5 to generate make
-      run: premake5 --gmcommon=./garrysmod_common gmake2
+      run: premake5 --gmcommon=./garrysmod_common vs2022
     - name: Build
       working-directory: ./build
       run: make
