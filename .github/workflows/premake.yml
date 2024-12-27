@@ -1,0 +1,23 @@
+name: Premake build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with: 
+        submodules: true
+    - uses: actions/upload-artifact@v4.5.0
+    - uses: abel0b/setup-premake@v2.4
+    - name: Setup premake
+      # Run premake5 to generate make
+      run: premake5 --gmcommon=./garrysmod_common vs2022
+    - name: Build
+      run: make
