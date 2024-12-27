@@ -16,10 +16,14 @@ jobs:
         path: 'build'
         submodules: true
     - uses: abel0b/setup-premake@v2.4
+      with:
+        version: "5.0.0-beta2"
     - name: Setup premake
+      working-directory: ./build
       # Run premake5 to generate make
       run: premake5 --gmcommon=./garrysmod_common vs2022
     - name: Build
+      working-directory: ./build
       run: make
     - name: Upload artifact
       uses: actions/upload-artifact@v4.5.0
