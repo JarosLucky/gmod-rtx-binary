@@ -27,7 +27,7 @@ jobs:
       run: premake5 --os=windows --gmcommon=./garrysmod_common vs2022
     - name: Build
       working-directory: ./build
-      run: make
+      run: msbuild RTXFixesBinary.sln
     - name: Upload artifact
       uses: actions/upload-artifact@v4.5.0
       with: 
