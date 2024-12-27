@@ -8,11 +8,12 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
 
     steps:
-    - name: Install dependencies
-      run: sudo apt-get install gcc-multilib g++-multilib
+    - uses: ilammy/msvc-dev-cmd@v1
+      with:
+        vsversion: 'vs2022'
     - uses: actions/checkout@v4
       with: 
         path: 'build'
