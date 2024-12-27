@@ -28,7 +28,7 @@ jobs:
     - name: Build
       working-directory: ./build
       run: msbuild RTXFixesBinary.sln /p:Configuration=Release /p:OutDir='bin'
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4.5.0
-      with: 
-        path: ${{ github.workspace }}/build/bin/**/*
+    - name: Create release
+      uses: ncipollo/release-action@v1
+      with:
+        artifacts: "${{ github.workspace }}/build/bin/**/*.dll"
