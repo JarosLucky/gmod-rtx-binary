@@ -1,3 +1,5 @@
+-- Disables source engine world rendering and replaces it with chunked mesh rendering instead, fixes engine culling issues. 
+-- MAJOR THANK YOU to the creator of NikNaks, a lot of this would not be possible without it.
 if not CLIENT then return end
 require("niknaks")
 
@@ -15,18 +17,14 @@ local renderStats = {draws = 0}
 local materialCache = {}
 
 -- Utility Functions
-local function IsSkyboxFace(face)
-    if not face then return false end
-    
-    local material = face:GetMaterial()
-    if not material then return false end
-    
-    local matName = material:GetName():lower()
-    
-    return matName:find("tools/toolsskybox") or
-           matName:find("skybox/") or
-           matName:find("sky_") or
-           false
+local function ShouldRenderFace(face)
+    invis = face:HasTexInfoFlag(0x0002) or -- SURF_SKY2D
+            face:HasTexInfoFlag(0x0004) or -- SURF_SKY
+            face:HasTexInfoFlag(0x0040) or -- SURF_TRIGGER
+            face:HasTexInfoFlag(0x0080) or -- SURF_NODRAW
+            face:HasTexInfoFlag(0x0200) or -- SURF_SKIP
+            false
+    return not invis
 end
 
 local function GetChunkKey(x, y, z)
@@ -142,7 +140,7 @@ local function BuildMapMeshes()
         if not leafFaces then continue end
 
         for _, face in pairs(leafFaces) do
-            if not face or not face:ShouldRender() or IsSkyboxFace(face) then continue end
+            if not face or not ShouldRenderFace(face) then continue end
             
             local vertices = face:GetVertexs()
             if not vertices or #vertices == 0 then continue end
@@ -264,7 +262,8 @@ local function EnableCustomRendering()
     if isEnabled then return end
     isEnabled = true
 
-    RunConsoleCommand("r_drawworld", "0")
+    RunConsoleCommand("r_drawopaqueworld", "0")
+    RunConsoleCommand("r_drawtranslucentworld", "0")
     
     hook.Add("PreDrawOpaqueRenderables", "RTXCustomWorld", function()
         RenderCustomWorld(false)
@@ -279,7 +278,8 @@ local function DisableCustomRendering()
     if not isEnabled then return end
     isEnabled = false
 
-    RunConsoleCommand("r_drawworld", "1")
+    RunConsoleCommand("r_drawopaqueworld", "1")
+    RunConsoleCommand("r_drawtranslucentworld", "1")
     
     hook.Remove("PreDrawOpaqueRenderables", "RTXCustomWorld")
     hook.Remove("PreDrawTranslucentRenderables", "RTXCustomWorld")
@@ -307,16 +307,25 @@ end)
 
 hook.Add("ShutDown", "RTXCustomWorld", function()
     DisableCustomRendering()
-    for _, chunkMaterials in pairs(mapMeshes) do
-        for _, group in pairs(chunkMaterials) do
-            for _, mesh in ipairs(group.meshes) do
-                if mesh.Destroy then
-                    mesh:Destroy()
+    
+    for renderType, chunks in pairs(mapMeshes) do
+        for chunkKey, materials in pairs(chunks) do
+            for matName, group in pairs(materials) do
+                if group.meshes then
+                    for _, mesh in ipairs(group.meshes) do
+                        if mesh.Destroy then
+                            mesh:Destroy()
+                        end
+                    end
                 end
             end
         end
     end
-    mapMeshes = {}
+    
+    mapMeshes = {
+        opaque = {},
+        translucent = {}
+    }
     materialCache = {}
 end)
 
