@@ -1,123 +1,105 @@
 include("shared.lua")
 
+local activeRTXLights = {}
+
+ENT.rtxEntityID = nil
+ENT.rtxLightHandle = nil
+ENT.lastPos = nil
+
 function ENT:Initialize()
     self:SetNoDraw(true)
     self:DrawShadow(false)
     
-    -- Delay light creation to ensure networked values are received
-    timer.Simple(0.1, function()
-        if IsValid(self) then
-            self:CreateRTXLight()
-        end
-    end)
+    -- Generate stable entity ID
+    self.rtxEntityID = self:EntIndex()
+    self:CreateRTXLight()
 end
 
 function ENT:CreateRTXLight()
+    -- Clean up existing light if it exists
     if self.rtxLightHandle then
-        pcall(function() 
-            DestroyRTXLight(self.rtxLightHandle)
-            print("[RTX Light] Destroyed existing light handle:", self.rtxLightHandle)
-        end)
+        DestroyRTXLight(self.rtxLightHandle)
         self.rtxLightHandle = nil
     end
 
     local pos = self:GetPos()
-    local size = self:GetLightSize()
-    local brightness = self:GetLightBrightness()
-    local r = self:GetLightR()
-    local g = self:GetLightG()
-    local b = self:GetLightB()
+    local handle = CreateRTXLight(
+        pos.x, 
+        pos.y, 
+        pos.z,
+        self:GetLightSize(),
+        self:GetLightBrightness(),
+        self:GetLightR(),
+        self:GetLightG(),
+        self:GetLightB(),
+        self.rtxEntityID
+    )
 
-    print(string.format("[RTX Light Entity] Creating light - Pos: %.2f,%.2f,%.2f, Size: %f, Brightness: %f, Color: %d,%d,%d",
-        pos.x, pos.y, pos.z, size, brightness, r, g, b))
-
-    local success, handle = pcall(function()
-        return CreateRTXLight(
-            pos.x, 
-            pos.y, 
-            pos.z,
-            size,
-            brightness,
-            r,
-            g,
-            b
-        )
-    end)
-
-    if success and handle then
+    if handle then
         self.rtxLightHandle = handle
-        self.lastUpdatePos = pos
-        self.lastUpdateTime = CurTime()
-        print("[RTX Light] Successfully created light with handle:", handle)
-    else
-        ErrorNoHalt("[RTX Light] Failed to create light: ", tostring(handle), "\n")
+        self.lastPos = pos
+        activeRTXLights[self:EntIndex()] = self
     end
 end
 
-function ENT:OnNetworkVarChanged(name, old, new)
-    if IsValid(self) and self.rtxLightHandle then
-        self:CreateRTXLight() -- Recreate light with new properties
-    end
+function ENT:UpdateLight()
+    if not self.rtxLightHandle then return end
+
+    local pos = self:GetPos()
+    if self.lastPos and pos:DistToSqr(self.lastPos) < 0.01 then return end
+
+    -- Destroy and recreate the light with new properties
+    self:CreateRTXLight()
 end
 
 function ENT:Think()
-    if not self.nextUpdate then self.nextUpdate = 0 end
-    if CurTime() < self.nextUpdate then return end
-    
-    -- Only update if we have a valid light
-    if self.rtxLightHandle then
-        local pos = self:GetPos()
-        
-        -- Check if we actually need to update
-        if not self.lastUpdatePos or pos:DistToSqr(self.lastUpdatePos) > 1 then
-            local success, newHandle = pcall(function()
-                return UpdateRTXLight(
-                    self.rtxLightHandle,
-                    pos.x, pos.y, pos.z,
-                    self:GetLightSize() / 10,  -- Scale down size
-                    self:GetLightBrightness() / 100,  -- Convert percentage to 0-1
-                    self:GetLightR(),
-                    self:GetLightG(),
-                    self:GetLightB()
-                )
-            end)
-            
-            if success and newHandle then
-                self.rtxLightHandle = newHandle
-                self.lastUpdatePos = pos
-                self.lastUpdateTime = CurTime()
-            else
-                -- If update failed, try to recreate the light
-                self:CreateRTXLight()
-            end
-        end
-    else
-        -- Try to recreate light if it's missing
-        self:CreateRTXLight()
+    if IsValid(self) then
+        self:UpdateLight()
     end
-    
-    self.nextUpdate = CurTime() + 0.1  -- Update every 0.1 seconds
 end
 
 function ENT:OnRemove()
     if self.rtxLightHandle then
-        print("[RTX Light] Cleaning up light handle:", self.rtxLightHandle)
-        pcall(function()
-            DestroyRTXLight(self.rtxLightHandle)
-        end)
+        DestroyRTXLight(self.rtxLightHandle)
         self.rtxLightHandle = nil
     end
+    activeRTXLights[self:EntIndex()] = nil
 end
 
-net.Receive("RTXLight_Cleanup", function()
-    local ent = net.ReadEntity()
-    if IsValid(ent) and ent.rtxLightHandle then
-        ent:OnRemove()
+-- Undo handler
+hook.Add("EntityRemoved", "RTXLight_Cleanup", function(ent)
+    if IsValid(ent) and ent:GetClass() == "base_rtx_light" then
+        if ent.rtxLightHandle then
+            DestroyRTXLight(ent.rtxLightHandle)
+            ent.rtxLightHandle = nil
+        end
+        activeRTXLights[ent:EntIndex()] = nil
+    end
+end)
+hook.Add("ShutDown", "RTXLight_Emergency", function()
+    for entIndex, ent in pairs(activeRTXLights) do
+        if IsValid(ent) and ent.rtxLightHandle then
+            pcall(function()
+                DestroyRTXLight(ent.rtxLightHandle)
+            end)
+        end
     end
 end)
 
+net.Receive("RTXLight_Cleanup", function()
+    local ent = net.ReadEntity()
+    if IsValid(ent) then
+        activeRTXLights[ent:EntIndex()] = nil
+        
+        if ent.rtxLightHandle then
+            pcall(function()
+                DestroyRTXLight(ent.rtxLightHandle)
+            end)
+            ent.rtxLightHandle = nil
+        end
+    end
+end)
 
--- Simple property menu
 function ENT:OpenPropertyMenu()
     if IsValid(self.PropertyPanel) then
         self.PropertyPanel:Remove()
@@ -146,13 +128,17 @@ function ENT:OpenPropertyMenu()
             net.WriteString("brightness")
             net.WriteFloat(value)
         net.SendToServer()
+        
+        if IsValid(self) and IsValidLightHandle(self.rtxLightHandle) then
+            self:UpdateLight()
+        end
     end
     
     -- Size Slider
     local sizeSlider = scroll:Add("DNumSlider")
     sizeSlider:Dock(TOP)
     sizeSlider:SetText("Size")
-    sizeSlider:SetMin(50)
+    sizeSlider:SetMin(1)
     sizeSlider:SetMax(1000)
     sizeSlider:SetDecimals(0)
     sizeSlider:SetValue(self:GetLightSize())
@@ -162,6 +148,10 @@ function ENT:OpenPropertyMenu()
             net.WriteString("size")
             net.WriteFloat(value)
         net.SendToServer()
+        
+        if IsValid(self) and IsValidLightHandle(self.rtxLightHandle) then
+            self:UpdateLight()
+        end
     end
     
     -- Color Mixer
@@ -179,6 +169,63 @@ function ENT:OpenPropertyMenu()
             net.WriteUInt(color.g, 8)
             net.WriteUInt(color.b, 8)
         net.SendToServer()
+        
+        if IsValid(self) and IsValidLightHandle(self.rtxLightHandle) then
+            self:UpdateLight()
+        end
+    end
+
+    local animateButton = scroll:Add("DButton")
+    animateButton:Dock(TOP)
+    animateButton:DockMargin(0, 10, 0, 0)
+    animateButton:SetTall(30)
+    animateButton:SetText(self.IsAnimating and "Stop Color Animation" or "Start Color Animation")
+    
+    local animSpeedSlider = scroll:Add("DNumSlider")
+    animSpeedSlider:Dock(TOP)
+    animSpeedSlider:SetText("Animation Speed")
+    animSpeedSlider:SetMin(25)
+    animSpeedSlider:SetMax(100)
+    animSpeedSlider:SetDecimals(1)
+    animSpeedSlider:SetValue(1)
+    animSpeedSlider:SetEnabled(self.IsAnimating)
+    
+    local function UpdateAnimation()
+        if self.IsAnimating then
+            if not self.AnimationTimer then
+                self.AnimationTimer = timer.Create("RTXLight_ColorAnim_" .. self:EntIndex(), 0.05, 0, function()
+                    if IsValid(self) then
+                        self:AnimateColor()
+                    end
+                end)
+            end
+        else
+            if self.AnimationTimer then
+                timer.Remove("RTXLight_ColorAnim_" .. self:EntIndex())
+                self.AnimationTimer = nil
+            end
+        end
+        
+        animateButton:SetText(self.IsAnimating and "Stop Color Animation" or "Start Color Animation")
+        animSpeedSlider:SetEnabled(self.IsAnimating)
+    end
+    
+    animateButton.DoClick = function()
+        self.IsAnimating = not self.IsAnimating
+        UpdateAnimation()
+    end
+    
+    animSpeedSlider.OnValueChanged = function(_, value)
+        if self.AnimationTimer then
+            timer.Adjust("RTXLight_ColorAnim_" .. self:EntIndex(), 0.1 / value, 0)
+        end
+    end
+    
+    frame.OnRemove = function()
+        if self.AnimationTimer then
+            timer.Remove("RTXLight_ColorAnim_" .. self:EntIndex())
+            self.AnimationTimer = nil
+        end
     end
     
     self.PropertyPanel = frame

@@ -1,6 +1,8 @@
 #include "GarrysMod/Lua/Interface.h"
+
 #include <remix/remix.h>
 #include <remix/remix_c.h>
+
 #include "cdll_client_int.h"
 #include "materialsystem/imaterialsystem.h"
 #include <shaderapi/ishaderapi.h>
@@ -20,10 +22,58 @@ remix::Interface* g_remix = nullptr;
 
 using namespace GarrysMod::Lua;
 
+typedef HRESULT (WINAPI* Present_t)(IDirect3DDevice9* device, CONST RECT* pSourceRect, CONST RECT* pDestRect, HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion);
+Present_t Present_Original = nullptr;
+
+HRESULT WINAPI Present_Hook(IDirect3DDevice9* device, CONST RECT* pSourceRect, CONST RECT* pDestRect, HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion) {
+    if (g_remix && RTXLightManager::Instance().HasActiveLights()) {
+        RTXLightManager::Instance().DrawLights();
+    }
+    
+    return Present_Original(device, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
+}
+
+LUA_FUNCTION(RTXBeginFrame) {
+    RTXLightManager::Instance().BeginFrame();
+    return 0;
+}
+
+LUA_FUNCTION(RTXEndFrame) {
+    RTXLightManager::Instance().EndFrame();
+    return 0;
+}
+
+LUA_FUNCTION(RegisterRTXLightEntityValidator) {
+    if (!LUA->IsType(1, GarrysMod::Lua::Type::FUNCTION)) {
+        LUA->ThrowError("Expected function as argument 1");
+        return 0;
+    }
+
+    // Store the function reference
+    LUA->Push(1); // Push the function
+    int functionRef = LUA->ReferenceCreate();
+
+    // Create the validator function that will call back to Lua
+    auto validator = [=](uint64_t entityID) -> bool {
+        LUA->ReferencePush(functionRef); // Push the stored function
+        LUA->PushNumber(static_cast<double>(entityID)); // Push entity ID
+        LUA->Call(1, 1); // Call with 1 arg, expect 1 return
+
+        bool exists = LUA->GetBool(-1);
+        LUA->Pop(); // Pop the return value
+
+        return exists;
+    };
+
+    // Register the validator with the RTX Light Manager
+    RTXLightManager::Instance().RegisterLuaEntityValidator(validator);
+
+    return 0;
+}
+
 LUA_FUNCTION(CreateRTXLight) {
     try {
         if (!g_remix) {
-            Msg("[RTX Remix Fixes] Remix interface is null\n");
             LUA->ThrowError("[RTX Remix Fixes] - Remix interface is null");
             return 0;
         }
@@ -36,10 +86,7 @@ LUA_FUNCTION(CreateRTXLight) {
         float r = LUA->CheckNumber(6);
         float g = LUA->CheckNumber(7);
         float b = LUA->CheckNumber(8);
-
-        // Debug print received values
-        Msg("[RTX Light Module] Received values - Pos: %.2f,%.2f,%.2f, Size: %f, Brightness: %f, Color: %f,%f,%f\n",
-            x, y, z, size, brightness, r, g, b);
+        uint64_t entityID = LUA->IsType(9, Type::NUMBER) ? static_cast<uint64_t>(LUA->GetNumber(9)) : 0;
 
         auto props = RTXLightManager::LightProperties();
         props.x = x;
@@ -52,38 +99,39 @@ LUA_FUNCTION(CreateRTXLight) {
         props.b = b / 255.0f;
 
         auto& manager = RTXLightManager::Instance();
-        auto handle = manager.CreateLight(props);
+        auto handle = manager.CreateLight(props, entityID);
+        
         if (!handle) {
-            Msg("[RTX Light Module] Failed to create light!\n");
-            LUA->ThrowError("[RTX Remix Fixes] - Failed to create light");
-            return 0;
+            LUA->PushNil();
+            return 1;
         }
 
-        Msg("[RTX Light Module] Light created successfully with handle %p\n", handle);
-        LUA->PushUserdata(handle);
+        // Push the handle
+        LUA->PushUserType(handle, Type::USERDATA);
         return 1;
     }
     catch (...) {
-        Msg("[RTX Light Module] Exception in CreateRTXLight\n");
-        LUA->ThrowError("[RTX Remix Fixes] - Exception in light creation");
-        return 0;
+        LUA->PushNil();
+        return 1;
     }
 }
-
 
 LUA_FUNCTION(UpdateRTXLight) {
     try {
         if (!g_remix) {
-            Msg("[RTX Remix Fixes] Remix interface is null\n");
-            LUA->ThrowError("[RTX Remix Fixes] - Remix interface is null");
-            return 0;
+            LUA->PushBool(false);
+            return 1;
+        }
+
+        if (!LUA->IsType(1, Type::USERDATA)) {
+            LUA->PushBool(false);
+            return 1;
         }
 
         auto handle = static_cast<remixapi_LightHandle>(LUA->GetUserdata(1));
         if (!handle) {
-            Msg("[RTX Remix Fixes] Invalid light handle\n");
-            LUA->ThrowError("[RTX Remix Fixes] - Invalid light handle");
-            return 0;
+            LUA->PushBool(false);
+            return 1;
         }
 
         float x = LUA->CheckNumber(2);
@@ -95,33 +143,32 @@ LUA_FUNCTION(UpdateRTXLight) {
         float g = LUA->CheckNumber(8);
         float b = LUA->CheckNumber(9);
 
-        Msg("[RTX Remix Fixes] Updating light at (%f, %f, %f) with size %f and brightness %f\n", 
-            x, y, z, size, brightness);
-
         auto props = RTXLightManager::LightProperties();
         props.x = x;
         props.y = y;
         props.z = z;
-        props.size = size < 1.0f ? 1.0f : size;
-        props.brightness = brightness < 0.1f ? 0.1f : brightness;
-        props.r = (r / 255.0f) > 1.0f ? 1.0f : (r / 255.0f < 0.0f ? 0.0f : r / 255.0f);
-        props.g = (g / 255.0f) > 1.0f ? 1.0f : (g / 255.0f < 0.0f ? 0.0f : g / 255.0f);
-        props.b = (b / 255.0f) > 1.0f ? 1.0f : (b / 255.0f < 0.0f ? 0.0f : b / 255.0f);
+        props.size = size;
+        props.brightness = brightness;
+        props.r = r / 255.0f;
+        props.g = g / 255.0f;
+        props.b = b / 255.0f;
 
         auto& manager = RTXLightManager::Instance();
-        if (!manager.UpdateLight(handle, props)) {
-            Msg("[RTX Remix Fixes] Failed to update light\n");
-            LUA->ThrowError("[RTX Remix Fixes] - Failed to update light");
-            return 0;
-        }
+        remixapi_LightHandle newHandle = nullptr;
+        bool success = manager.UpdateLight(handle, props, &newHandle);
 
-        LUA->PushUserdata(handle);
-        return 1;
+        LUA->PushBool(success);
+        
+        if (success && newHandle && newHandle != handle) {
+            LUA->PushUserType(newHandle, Type::USERDATA);
+            return 2;  // Return both success and new handle
+        }
+        
+        return 1;  // Return just success
     }
     catch (...) {
-        Msg("[RTX Remix Fixes] Exception in UpdateRTXLight\n");
-        LUA->ThrowError("[RTX Remix Fixes] - Exception in light update");
-        return 0;
+        LUA->PushBool(false);
+        return 1;
     }
 }
 
@@ -200,16 +247,14 @@ void* FindD3D9Device() {
     return device;
 } 
 
+extern IVEngineClient* engine = NULL;
+#include "mathlib/mathlib.h"
+
 #include "globalconvars.h"
 GMOD_MODULE_OPEN() {
     GlobalConvars::InitialiseConVars();
     try {
         Msg("[RTX Remix Fixes 2] - Module loaded!\n"); 
-
-        // Initialize modules
-        CullingHooks::Instance().Initialize();
-        ShaderAPIHooks::Instance().Initialize();
-        ModelRenderHooks::Instance().Initialize();
 
         // Find Source's D3D9 device
         auto sourceDevice = static_cast<IDirect3DDevice9Ex*>(FindD3D9Device());
@@ -228,6 +273,16 @@ GMOD_MODULE_OPEN() {
 
         g_remix->dxvk_RegisterD3D9Device(sourceDevice);
 
+        // Setup frame rendering
+        void** vTable = *reinterpret_cast<void***>(sourceDevice);
+        Present_Original = reinterpret_cast<Present_t>(vTable[17]); // Present is at index 17
+
+        // Setup hook
+        DWORD oldProtect;
+        VirtualProtect(vTable + 17, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtect);
+        vTable[17] = reinterpret_cast<void*>(&Present_Hook);
+        VirtualProtect(vTable + 17, sizeof(void*), oldProtect, &oldProtect);
+
         // Initialize RTX Light Manager
         RTXLightManager::Instance().Initialize(g_remix);
 
@@ -239,6 +294,15 @@ GMOD_MODULE_OPEN() {
 
         // Register Lua functions
         LUA->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB); 
+            LUA->PushCFunction(RTXBeginFrame);
+            LUA->SetField(-2, "RTXBeginFrame");
+            
+            LUA->PushCFunction(RTXEndFrame);
+            LUA->SetField(-2, "RTXEndFrame");
+
+            LUA->PushCFunction(RegisterRTXLightEntityValidator);
+            LUA->SetField(-2, "RegisterRTXLightEntityValidator");
+
             LUA->PushCFunction(CreateRTXLight);
             LUA->SetField(-2, "CreateRTXLight");
             
@@ -268,15 +332,20 @@ GMOD_MODULE_OPEN() {
 GMOD_MODULE_CLOSE() {
     try {
         Msg("[RTX] Shutting down module...\n");
-
-        // Shutdown modules
-        CullingHooks::Instance().Shutdown();
-
-        ShaderAPIHooks::Instance().Shutdown();
         
         RTXLightManager::Instance().Shutdown();
 
-        ModelRenderHooks::Instance().Shutdown();
+        // Restore original Present function if needed
+        if (Present_Original) {
+            auto device = static_cast<IDirect3DDevice9Ex*>(FindD3D9Device());
+            if (device) {
+                void** vTable = *reinterpret_cast<void***>(device);
+                DWORD oldProtect;
+                VirtualProtect(vTable + 17, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtect);
+                vTable[17] = reinterpret_cast<void*>(Present_Original);
+                VirtualProtect(vTable + 17, sizeof(void*), oldProtect, &oldProtect);
+            }
+        }
 
         if (g_remix) {
             delete g_remix;
